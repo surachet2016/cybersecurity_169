@@ -1,23 +1,30 @@
 """Generate Thai-language PDF summaries for unit 4 and unit 5 of 10-024-109.
 
-Run with: .venv/bin/python scripts/generate_pdfs.py
-Requires: fpdf2, assets/fonts/Sarabun-Regular.ttf, assets/fonts/Sarabun-Bold.ttf
+Renders each unit as HTML and prints it to PDF via headless Chrome, so
+Thai text shaping (tone marks, combining vowels) matches the actual
+website. An earlier version used fpdf2, which doesn't perform complex
+-script shaping and silently mispositioned marks like ไม้เอก/ไม้โท.
+
+Run with: python3 scripts/generate_pdfs.py
+Requires: Google Chrome installed at the default macOS path.
 """
 
+import subprocess
+import tempfile
 from pathlib import Path
 
-from fpdf import FPDF
-from fpdf.enums import MethodReturnValue, WrapMode
-
 ROOT = Path(__file__).resolve().parent.parent
-FONTS_DIR = ROOT / "assets" / "fonts"
 OUTPUT_DIR = ROOT / "assets" / "pdf"
 
-PRIMARY_DARK = (8, 64, 111)
-ACCENT = (20, 136, 201)
-GROUP_COLOR = (28, 138, 94)
-TEXT_MUTED = (91, 107, 122)
-TEXT_BODY = (40, 48, 56)
+CHROME_CANDIDATES = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+]
+
+PRIMARY_DARK = "#08406f"
+ACCENT = "#1488c9"
+GROUP_COLOR = "#1c8a5e"
+TEXT_MUTED = "#5b6b7a"
+TEXT_BODY = "#282f38"
 
 UNITS = [
     {
@@ -216,137 +223,146 @@ UNITS = [
 ]
 
 
-def write_wrapped(pdf: FPDF, line_height: float, text: str) -> None:
-    """Render text line-by-line via cell().
+def find_chrome() -> str:
+    for path in CHROME_CANDIDATES:
+        if Path(path).exists():
+            return path
+    raise RuntimeError("Google Chrome not found; install it or update CHROME_CANDIDATES")
 
-    fpdf2's multi_cell() can hang indefinitely when WrapMode.CHAR text
-    (needed for Thai, which has no spaces) triggers an automatic page
-    break. Pre-computing the wrapped lines with a dry run and drawing
-    each line with cell() avoids that code path entirely.
+
+def render_assignment_html(assignment: dict) -> str:
+    badge_class = "badge-single" if assignment["kind"] == "งานเดี่ยว" else "badge-group"
+    requirements = "".join(f"<li>{item}</li>" for item in assignment["requirements"])
+    rubric_rows = "".join(
+        f"<tr><td>{criteria}</td><td>{score}</td></tr>" for criteria, score in assignment["rubric"]
+    )
+    return f"""
+    <div class="assignment">
+      <span class="badge {badge_class}">{assignment['kind']}</span>
+      <h3>{assignment['title']}</h3>
+      <p class="brief">{assignment['brief']}</p>
+      <div class="meta-row">
+        <div><div class="meta-label">รูปแบบส่ง</div><div>{assignment['format']}</div></div>
+        <div><div class="meta-label">กำหนดส่ง</div><div>{assignment['deadline']}</div></div>
+      </div>
+      <div class="sub-label">องค์ประกอบที่ต้องมี</div>
+      <ul class="req-list">{requirements}</ul>
+      <div class="sub-label">เกณฑ์การให้คะแนน (เต็ม 100)</div>
+      <table class="rubric"><tbody>{rubric_rows}</tbody></table>
+    </div>
     """
-    lines = pdf.multi_cell(
-        0,
-        line_height,
-        text,
-        wrapmode=WrapMode.CHAR,
-        align="L",
-        dry_run=True,
-        output=MethodReturnValue.LINES,
+
+
+def render_unit_html(unit: dict) -> str:
+    topics_html = "".join(
+        f'<div class="topic"><h2>{heading}</h2><p>{body}</p></div>'
+        for heading, body in unit["topics"]
     )
-    for line in lines:
-        pdf.cell(0, line_height, line, new_x="LMARGIN", new_y="NEXT")
+    assignments_html = "".join(render_assignment_html(a) for a in unit["assignments"])
+    return f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  @page {{ size: A4; margin: 15mm 15mm 18mm; }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0;
+    font-family: "Sarabun", "Tahoma", sans-serif;
+    color: {TEXT_BODY};
+    font-size: 11.5pt;
+    line-height: 1.7;
+  }}
+  .banner {{
+    background: {PRIMARY_DARK};
+    color: #fff;
+    margin: 0 0 8mm;
+    padding: 6mm 8mm;
+    border-radius: 3mm;
+  }}
+  .banner .code {{ font-size: 10.5pt; font-weight: 400; margin-bottom: 2mm; }}
+  .banner h1 {{ font-size: 18pt; margin: 0 0 2mm; font-weight: 700; }}
+  .banner .meta {{ font-size: 10pt; font-weight: 400; }}
+  .intro {{ color: {TEXT_MUTED}; margin-bottom: 6mm; }}
+  .topic {{ margin-bottom: 5mm; page-break-inside: avoid; }}
+  .topic h2 {{ color: {ACCENT}; font-size: 12.5pt; margin: 0 0 2mm; }}
+  .topic p {{ margin: 0; }}
+  .assignments-title {{
+    color: {PRIMARY_DARK}; font-size: 14pt; font-weight: 700;
+    margin: 0 0 4mm; page-break-before: always;
+  }}
+  .assignment {{ margin-bottom: 8mm; page-break-inside: avoid; }}
+  .badge {{
+    display: inline-block; color: #fff; font-size: 9pt; font-weight: 700;
+    padding: 1mm 3mm; border-radius: 8px; margin-bottom: 2mm;
+  }}
+  .badge-single {{ background: {ACCENT}; }}
+  .badge-group {{ background: {GROUP_COLOR}; }}
+  .assignment h3 {{ font-size: 12.5pt; margin: 0 0 2mm; }}
+  .brief {{ color: {TEXT_MUTED}; margin: 0 0 3mm; }}
+  .meta-row {{ display: flex; gap: 6mm; margin-bottom: 3mm; }}
+  .meta-label {{ color: {ACCENT}; font-size: 9pt; font-weight: 600; }}
+  .sub-label {{ font-weight: 700; font-size: 10pt; margin-bottom: 1mm; }}
+  .req-list {{ margin: 0 0 3mm; padding-left: 5mm; color: {TEXT_MUTED}; }}
+  .req-list li {{ margin-bottom: 1mm; }}
+  table.rubric {{ width: 100%; border-collapse: collapse; font-size: 10pt; margin-bottom: 2mm; }}
+  table.rubric td {{ padding: 1.5mm 2mm; border-bottom: 1px solid #dde6ee; color: {TEXT_MUTED}; }}
+  table.rubric td:last-child {{ width: 12mm; text-align: right; font-weight: 700; color: {PRIMARY_DARK}; }}
+  .footer {{
+    margin-top: 10mm;
+    padding-top: 3mm;
+    border-top: 1px solid #dde6ee;
+    text-align: center;
+    font-size: 8.5pt;
+    color: {TEXT_MUTED};
+  }}
+</style>
+</head>
+<body>
+  <div class="banner">
+    <div class="code">10-024-109 ความฉลาดทางดิจิทัล (Digital Intelligence)</div>
+    <h1>{unit['tag']}: {unit['title']}</h1>
+    <div class="meta">{unit['meta']}</div>
+  </div>
+  <p class="intro">{unit['intro']}</p>
+  {topics_html}
+  <div class="assignments-title">งานมอบหมายประจำ{unit['tag']}</div>
+  {assignments_html}
+  <div class="footer">คณะวิทยาการจัดการ มหาวิทยาลัยนราธิวาสราชนครินทร์ - ภาคการศึกษา 1 ปีการศึกษา 2569</div>
+</body>
+</html>"""
 
 
-def render_assignments(pdf: FPDF, unit: dict) -> None:
-    pdf.set_text_color(*PRIMARY_DARK)
-    pdf.set_font("Sarabun", "B", 14)
-    write_wrapped(pdf, 8, f"งานมอบหมายประจำ{unit['tag']}")
-    pdf.ln(2)
-
-    for assignment in unit["assignments"]:
-        badge_color = ACCENT if assignment["kind"] == "งานเดี่ยว" else GROUP_COLOR
-        pdf.set_fill_color(*badge_color)
-        pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Sarabun", "B", 9)
-        pdf.cell(28, 6.5, assignment["kind"], fill=True, align="C", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(1)
-
-        pdf.set_text_color(*TEXT_BODY)
-        pdf.set_font("Sarabun", "B", 12.5)
-        write_wrapped(pdf, 6.8, assignment["title"])
-
-        pdf.set_text_color(*TEXT_MUTED)
-        pdf.set_font("Sarabun", "", 10.5)
-        write_wrapped(pdf, 6, assignment["brief"])
-        pdf.ln(1)
-
-        pdf.set_text_color(*TEXT_BODY)
-        pdf.set_font("Sarabun", "B", 10)
-        pdf.cell(0, 6, "รูปแบบส่ง", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Sarabun", "", 10)
-        write_wrapped(pdf, 5.8, assignment["format"])
-        pdf.set_font("Sarabun", "B", 10)
-        pdf.cell(0, 6, "กำหนดส่ง", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Sarabun", "", 10)
-        write_wrapped(pdf, 5.8, assignment["deadline"])
-        pdf.ln(1)
-
-        pdf.set_font("Sarabun", "B", 10)
-        pdf.cell(0, 6, "องค์ประกอบที่ต้องมี", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Sarabun", "", 10)
-        for item in assignment["requirements"]:
-            write_wrapped(pdf, 5.8, f"-  {item}")
-        pdf.ln(1)
-
-        pdf.set_font("Sarabun", "B", 10)
-        pdf.cell(0, 6, "เกณฑ์การให้คะแนน (เต็ม 100)", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Sarabun", "", 10)
-        for criteria, score in assignment["rubric"]:
-            pdf.cell(150, 6, criteria, border="B")
-            pdf.cell(0, 6, str(score), border="B", align="R", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(7)
-
-
-def build_pdf(unit: dict) -> FPDF:
-    pdf = FPDF(format="A4")
-    pdf.set_margins(left=15, top=10, right=15)
-    pdf.set_auto_page_break(auto=True, margin=20)
-    pdf.add_font("Sarabun", "", str(FONTS_DIR / "Sarabun-Regular.ttf"))
-    pdf.add_font("Sarabun", "B", str(FONTS_DIR / "Sarabun-Bold.ttf"))
-    pdf.add_page()
-
-    pdf.set_fill_color(*PRIMARY_DARK)
-    pdf.rect(0, 0, pdf.w, 38, style="F")
-    pdf.set_xy(15, 10)
-    pdf.set_font("Sarabun", "B", 11)
-    pdf.set_text_color(255, 255, 255)
-    pdf.cell(0, 6, "10-024-109 ความฉลาดทางดิจิทัล (Digital Intelligence)")
-    pdf.set_xy(15, 18)
-    pdf.set_font("Sarabun", "B", 16)
-    pdf.cell(0, 8, f"{unit['tag']}: {unit['title']}")
-    pdf.set_xy(15, 28)
-    pdf.set_font("Sarabun", "", 10)
-    pdf.cell(0, 6, unit["meta"])
-
-    pdf.set_xy(15, 50)
-    pdf.set_text_color(*TEXT_MUTED)
-    pdf.set_font("Sarabun", "", 11.5)
-    write_wrapped(pdf, 6.5, unit["intro"])
-    pdf.ln(4)
-
-    for heading, body in unit["topics"]:
-        pdf.set_text_color(*ACCENT)
-        pdf.set_font("Sarabun", "B", 13)
-        write_wrapped(pdf, 7, heading)
-        pdf.set_text_color(*TEXT_BODY)
-        pdf.set_font("Sarabun", "", 11)
-        write_wrapped(pdf, 6.3, body)
-        pdf.ln(5)
-
-    pdf.add_page()
-    pdf.set_xy(15, 20)
-    render_assignments(pdf, unit)
-
-    pdf.set_auto_page_break(False)
-    pdf.set_y(-18)
-    pdf.set_font("Sarabun", "", 8.5)
-    pdf.set_text_color(*TEXT_MUTED)
-    pdf.cell(
-        0,
-        6,
-        "คณะวิทยาการจัดการ มหาวิทยาลัยนราธิวาสราชนครินทร์ - ภาคการศึกษา 1 ปีการศึกษา 2569",
-        align="C",
+def render_pdf(chrome: str, html_path: Path, pdf_path: Path) -> None:
+    subprocess.run(
+        [
+            chrome,
+            "--headless",
+            "--disable-gpu",
+            "--no-pdf-header-footer",
+            f"--print-to-pdf={pdf_path}",
+            "--virtual-time-budget=5000",
+            f"file://{html_path}",
+        ],
+        check=True,
+        capture_output=True,
     )
-    return pdf
 
 
 def main() -> None:
+    chrome = find_chrome()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    for unit in UNITS:
-        pdf = build_pdf(unit)
-        out_path = OUTPUT_DIR / unit["filename"]
-        pdf.output(str(out_path))
-        print(f"created {out_path.relative_to(ROOT)}")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        for unit in UNITS:
+            html_path = tmp_path / f"{unit['filename']}.html"
+            html_path.write_text(render_unit_html(unit), encoding="utf-8")
+            out_path = OUTPUT_DIR / unit["filename"]
+            render_pdf(chrome, html_path, out_path)
+            print(f"created {out_path.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
